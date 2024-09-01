@@ -23,4 +23,4 @@ jobs:
     - name: Delete old release files
       run: node cleanup-releases.js
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        FILES_TOKEN: ${{ secrets.FILES_TOKEN }}  # 更新为你设置的密钥名称
