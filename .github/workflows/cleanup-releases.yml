@@ -1,0 +1,26 @@
+name: Cleanup GitHub Release Files
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # 每小时运行一次
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '16'
+
+    - name: Install dependencies
+      run: npm install axios
+
+    - name: Delete old release files
+      run: node cleanup-releases.js
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
