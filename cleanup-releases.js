@@ -1,9 +1,9 @@
 const axios = require('axios');
 
 const FILES_TOKEN = process.env.FILES_TOKEN;  // 更新为你设置的密钥名称
-const REPO_OWNER = '你的GitHub用户名';
-const REPO_NAME = '你的仓库名称';
-const RELEASE_ID = 172917597; // 你指定的Release ID
+const REPO_OWNER = '2091k';
+const REPO_NAME = 'githubfiles';
+const RELEASE_ID = 172925004; // 你指定的Release ID
 
 const deleteOldFiles = async () => {
   const now = new Date();
