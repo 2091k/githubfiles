@@ -59,21 +59,8 @@ async function handleRequest(request) {
   shownImages.add(randomIndex);
 
   let randomImageUrl = images[randomIndex].download_url;
-  randomImageUrl = randomImageUrl.replace('https://raw.githubusercontent.com/', 'https://raw.githubusercontent.com/');
+  randomImageUrl = randomImageUrl.replace('https://raw.githubusercontent.com/', 'https://jasu.oo.me.eu.org/https://raw.githubusercontent.com/');
 
-  const imageResponse = await fetch(randomImageUrl, {
-    headers: {
-      'User-Agent': 'Cloudflare Workers'
-    }
-  });
-
-  if (!imageResponse.ok) {
-    return new Response('Failed to fetch the image', { status: 500 });
-  }
-
-  return new Response(imageResponse.body, {
-    headers: {
-      'Content-Type': imageResponse.headers.get('Content-Type') || 'image/jpeg'
-    }
-  });
+  // 返回 302 重定向响应，跳转到图片地址
+  return Response.redirect(randomImageUrl, 302);
 }
