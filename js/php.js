@@ -31,11 +31,49 @@ function imageHtml() {
     <title>小姐姐图片在线随机播放 - 魏无羡</title>
     <style>
       ${css()}
+      /* 图片弹窗缩放样式 */
+      #imgModal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: rgba(0,0,0,0.92);
+        z-index: 9999;
+        cursor: grab;
+        overflow: hidden;
+      }
+      #imgModal.active {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #imgModal.dragging {
+        cursor: grabbing;
+      }
+      #modalImg {
+        max-width: 95vw;
+        max-height: 95vh;
+        transition: transform 0.1s ease-out;
+        transform-origin: center center;
+      }
+      #closeModal {
+        position: fixed;
+        top: 20px;
+        right: 30px;
+        color: #fff;
+        font-size: 40px;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        z-index: 10000;
+      }
     </style>
 </head>
 <body>
   <section id="main">
-    <img id="player" src="随机图片地址">
+    <img id="player" src="https://xjjtu.2091k.cn">
   </section>
   <section id="buttons">
     <a href="?type=video">
@@ -43,6 +81,95 @@ function imageHtml() {
     </a>
     <button id="next" onclick="location.reload()">下一个</button>
   </section>
+
+  <!-- 图片放大弹窗 -->
+  <div id="imgModal">
+    <button id="closeModal">×</button>
+    <img id="modalImg" src="">
+  </div>
+
+  <script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.src = "https://hm.baidu.com/hm.js?d69e07b9eec7a81616400c95de2448f4";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+
+// 图片缩放逻辑
+(function(){
+  const player = document.getElementById('player');
+  const modal = document.getElementById('imgModal');
+  const modalImg = document.getElementById('modalImg');
+  const closeBtn = document.getElementById('closeModal');
+
+  let scale = 1;
+  let posX = 0;
+  let posY = 0;
+  let isDrag = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let imgStartX = 0;
+  let imgStartY = 0;
+  const zoomStep = 0.15;
+  const maxScale = 5;
+  const minScale = 0.3;
+
+  // 打开弹窗
+  player.addEventListener('click', ()=>{
+    modalImg.src = player.src;
+    scale = 1;
+    posX = 0;
+    posY = 0;
+    updateTransform();
+    modal.classList.add('active');
+  })
+
+  // 关闭弹窗
+  closeBtn.addEventListener('click', ()=> modal.classList.remove('active'));
+  modal.addEventListener('click', (e)=>{
+    if(e.target === modal) modal.classList.remove('active');
+  })
+
+  // 更新图片位移缩放
+  function updateTransform(){
+    modalImg.style.transform = \`translate(\${posX}px,\${posY}px) scale(\${scale})\`;
+  }
+
+  // 滚轮缩放
+  modal.addEventListener('wheel', (e)=>{
+    e.preventDefault();
+    if(e.deltaY < 0){
+      scale += zoomStep;
+    }else{
+      scale -= zoomStep;
+    }
+    scale = Math.max(minScale, Math.min(maxScale, scale));
+    updateTransform();
+  }, {passive:false})
+
+  // 拖拽逻辑
+  modal.addEventListener('mousedown', (e)=>{
+    isDrag = true;
+    modal.classList.add('dragging');
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    imgStartX = posX;
+    imgStartY = posY;
+  })
+  window.addEventListener('mousemove', (e)=>{
+    if(!isDrag) return;
+    posX = imgStartX + (e.clientX - dragStartX);
+    posY = imgStartY + (e.clientY - dragStartY);
+    updateTransform();
+  })
+  window.addEventListener('mouseup', ()=>{
+    isDrag = false;
+    modal.classList.remove('dragging');
+  })
+})();
+  </script>
 </body>
 </html>`;
 }
@@ -65,7 +192,7 @@ function videoHtml() {
 </head>
 <body>
   <section id="main">
-    <video id="player" src="随机视频地址" controls autoplay webkit-playsinline playsinline></video> 
+    <video id="player" src="https://xjjvideo.2091k.cn" controls autoplay webkit-playsinline playsinline></video> 
   </section>
   <section id="buttons">
     <button id="switch">连续: 开</button>
@@ -79,7 +206,7 @@ function videoHtml() {
       var auto = true;
       var player = document.getElementById('player');
       document.getElementById('next').addEventListener('click', function () {
-        player.src = 'https://xjjvideo.oo.me.eu.org';
+        player.src = 'https://xjjvideo.2091k.cn';
         player.play();
       });
       document.getElementById('switch').addEventListener('click', function () {
@@ -88,12 +215,21 @@ function videoHtml() {
       });
       player.addEventListener('ended', function () {
         if (auto) {
-          player.src = '随机视频地址';
+          player.src = 'https://xjjvideo.2091k.cn';
           player.play();
         }
       });
     })(window, document);
   </script>
+  <script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.src = "https://hm.baidu.com/hm.js?d69e07b9eec7a81616400c95de2448f4";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
 </body>
 </html>`;
 }
@@ -125,6 +261,7 @@ function css() {
     width: 100%;
     height: auto;
     max-height: 100%;
+    cursor: zoom-in;
   }
   #buttons {
     height: 60px;
