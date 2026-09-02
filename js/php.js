@@ -112,12 +112,13 @@ var _hmt = _hmt || [];
   let dragStartY = 0;
   let imgStartX = 0;
   let imgStartY = 0;
-  const zoomStep = 0.15;
+  const zoomStep = 0.2;
   const maxScale = 5;
-  const minScale = 0.3;
+  const minScale = 0.5;
 
   // 打开弹窗
-  player.addEventListener('click', ()=>{
+  player.addEventListener('click', (e)=>{
+    e.stopPropagation();
     modalImg.src = player.src;
     scale = 1;
     posX = 0;
@@ -127,9 +128,15 @@ var _hmt = _hmt || [];
   })
 
   // 关闭弹窗
-  closeBtn.addEventListener('click', ()=> modal.classList.remove('active'));
+  closeBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    modal.classList.remove('active');
+  });
   modal.addEventListener('click', (e)=>{
-    if(e.target === modal) modal.classList.remove('active');
+    if(e.target === modal){
+      e.stopPropagation();
+      modal.classList.remove('active');
+    }
   })
 
   // 更新图片位移缩放
@@ -137,20 +144,36 @@ var _hmt = _hmt || [];
     modalImg.style.transform = \`translate(\${posX}px,\${posY}px) scale(\${scale})\`;
   }
 
-  // 滚轮缩放
+  // 滚轮缩放 - 以鼠标位置为中心
   modal.addEventListener('wheel', (e)=>{
     e.preventDefault();
+    e.stopPropagation();
+    
+    const rect = modalImg.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    
+    const mouseX = e.clientX - centerX;
+    const mouseY = e.clientY - centerY;
+    
+    const oldScale = scale;
     if(e.deltaY < 0){
-      scale += zoomStep;
+      scale = Math.min(maxScale, scale + zoomStep);
     }else{
-      scale -= zoomStep;
+      scale = Math.max(minScale, scale - zoomStep);
     }
-    scale = Math.max(minScale, Math.min(maxScale, scale));
+    
+    const scaleRatio = scale / oldScale;
+    posX = mouseX - (mouseX - posX) * scaleRatio;
+    posY = mouseY - (mouseY - posY) * scaleRatio;
+    
     updateTransform();
   }, {passive:false})
 
   // 拖拽逻辑
   modal.addEventListener('mousedown', (e)=>{
+    if(e.button !== 0) return;
+    e.preventDefault();
     isDrag = true;
     modal.classList.add('dragging');
     dragStartX = e.clientX;
@@ -160,14 +183,62 @@ var _hmt = _hmt || [];
   })
   window.addEventListener('mousemove', (e)=>{
     if(!isDrag) return;
+    e.preventDefault();
     posX = imgStartX + (e.clientX - dragStartX);
     posY = imgStartY + (e.clientY - dragStartY);
     updateTransform();
   })
-  window.addEventListener('mouseup', ()=>{
-    isDrag = false;
-    modal.classList.remove('dragging');
+  window.addEventListener('mouseup', (e)=>{
+    if(isDrag){
+      e.preventDefault();
+      isDrag = false;
+      modal.classList.remove('dragging');
+    }
   })
+  
+  // 触摸支持
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchImgStartX = 0;
+  let touchImgStartY = 0;
+  let lastTouchDistance = 0;
+  let lastTouchScale = 1;
+
+  modal.addEventListener('touchstart', (e)=>{
+    if(e.touches.length === 1){
+      isDrag = true;
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchImgStartX = posX;
+      touchImgStartY = posY;
+    } else if(e.touches.length === 2){
+      isDrag = false;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      lastTouchDistance = Math.sqrt(dx*dx + dy*dy);
+      lastTouchScale = scale;
+    }
+  }, {passive: false});
+
+  modal.addEventListener('touchmove', (e)=>{
+    e.preventDefault();
+    if(e.touches.length === 1 && isDrag){
+      posX = touchImgStartX + (e.touches[0].clientX - touchStartX);
+      posY = touchImgStartY + (e.touches[0].clientY - touchStartY);
+      updateTransform();
+    } else if(e.touches.length === 2){
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const distance = Math.sqrt(dx*dx + dy*dy);
+      const scaleRatio = distance / lastTouchDistance;
+      scale = Math.max(minScale, Math.min(maxScale, lastTouchScale * scaleRatio));
+      updateTransform();
+    }
+  }, {passive: false});
+
+  modal.addEventListener('touchend', (e)=>{
+    isDrag = false;
+  });
 })();
   </script>
 </body>
@@ -185,7 +256,7 @@ function videoHtml() {
     <meta name="referrer" content="never">
     <meta name="renderer" content="webkit" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>小姐姐视频在线随机播放 - 魏无羡</title>
+    <title>小姐姐视频在线随机播放</title>
     <style>
       ${css()}
     </style>
@@ -261,7 +332,6 @@ function css() {
     width: 100%;
     height: auto;
     max-height: 100%;
-    cursor: zoom-in;
   }
   #buttons {
     height: 60px;
