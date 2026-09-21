@@ -24,7 +24,7 @@
 //   - 页面响应带 Cache-Control: no-store。否则改完前端脚本,浏览器还在跑旧页面,
 //     看着就是"改了没用"。
 //
-// 三条硬规矩(别再改回去):
+// 四条硬规矩(别再改回去):
 //   1) 换图/换视频必须"新 URL(?r=随机) + media.load()"。
 //      固定 URL 赋给 src 属于同一次资源加载,浏览器不会重新请求
 //      —— 这就是"点播放下一个没反应 / 只是从头再播"的根因。
@@ -33,10 +33,13 @@
 //   3) 视频 #player 用 max-width/max-height,不要 width:100%。
 //      width:100% 会把 <video> 元素撑成 1.73:1 的"长条",竖屏视频只画中间一条,
 //      原生进度条跟着元素宽度铺满整屏,看起来"跑到画面外面"。
+//   4) 媒体 URL 必须自带视频身份(?i=<下标>&v=<文件名>),反代也必须把查询串原样带走。
+//      视频源每次请求都随机挑一个视频,URL 不带身份 + 查询串被丢掉的结果就是:
+//      浏览器暂停久了重发一次请求(续传 Range)就变成另一个视频 —— 见 proxyRequest 与视频页脚本。
 //
-// 构建标记:page-build: 2026-02-20-r6 (单文件入口版)
+// 构建标记:page-build: 2026-02-20-r12 (媒体 URL 钉住视频身份 / 「播放下一个」就是换台)
 
-const BUILD = 'page-build: 2026-02-20-r10 (单文件入口版)';
+const BUILD = 'page-build: 2026-02-20-r12 (媒体 URL 钉住视频身份)';
 
 const PAGE_HEADERS = {
   'Content-Type': 'text/html;charset=UTF-8',
@@ -63,11 +66,14 @@ export default {
 
     try {
       // ---------- 1. 媒体:反代到对应源站(写去重 Cookie / 透传 Range) ----------
+      // ★ 必须把原始路径 + 查询串一起传过去:视频源靠 ?i= / ?v= / ?plan=1 才知道
+      //   "这一次要播哪一个"。查询串一丢,源站就只能每次随机换一个视频 ——
+      //   浏览器暂停久了重发的那次请求(续传 Range)于是变成另一个视频。
       if (matchRootPath(url.pathname, '/tu')) {
-        return await proxyRequest(IMAGE_ORIGIN, request);
+        return await proxyRequest(IMAGE_ORIGIN, url, request);
       }
       if (matchRootPath(url.pathname, '/video')) {
-        return await proxyRequest(VIDEO_ORIGIN, request);
+        return await proxyRequest(VIDEO_ORIGIN, url, request);
       }
 
       // ---------- 2. 页面 ----------
@@ -81,7 +87,7 @@ export default {
 
       // ---------- 3. 其它路径 ----------
       if (SITE_FALLBACK) {
-        return await proxyRequest(SITE_FALLBACK + url.pathname + url.search, request);
+        return await proxyRequest(SITE_FALLBACK, url, request);
       }
       return new Response(
         '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
@@ -126,9 +132,7 @@ function isDocumentNavigation(request) {
   return accept.indexOf('text/html') !== -1;
 }
 
-async function proxyRequest(target, request) {
-  const url = new URL(request.url);
-
+async function proxyRequest(origin, url, request) {
   // 地址栏直接打开媒体路径 → 302 回对应页面,别把地址栏留在 /tu、/video
   if (isDocumentNavigation(request)) {
     const back = matchRootPath(url.pathname, '/tu') ? '/?type=png' : '/';
@@ -141,9 +145,15 @@ async function proxyRequest(target, request) {
   const headers = new Headers(request.headers);
   for (const h of STRIP_HEADERS) headers.delete(h);
 
+  // ★ 路径 + 查询串原样带到上游(?i= / ?v= / ?plan=1 / ?r= 全靠它)。
+  //   以前 target 就是裸的 origin,查询串整个丢掉,于是视频源每次都随机挑一个视频:
+  //   同一个 URL 前后两次请求拿到不同视频 —— 这就是"暂停一会儿再点播放,变成新视频"的根因。
+  const target = new URL(origin);
+  const targetUrl = target.origin + url.pathname + url.search;
+
   const method = request.method || 'GET';
   const hasBody = method !== 'GET' && method !== 'HEAD';
-  const res = await fetch(new Request(target, {
+  const res = await fetch(new Request(targetUrl, {
     method,
     headers,
     body: hasBody ? request.body : undefined,
@@ -661,14 +671,18 @@ function videoHtml() {
   <div id="hint"></div>
 
   <script>
-// 视频页:核心是"换视频必须是一个全新的 URL + 显式 load()"
+// 视频页:两条规矩,缺一不可
 //
-// 之前是 player.src = 固定URL; player.play():
-//   - 同一个 URL 赋值给 src 属于同一次资源加载,浏览器不会重新请求,
-//     所以"播放下一个"点了没反应、切换页面回来也一样;
-//   - 固定 URL 还容易被浏览器/中间层缓存,拿到上一次的视频。
-// 现在:每次都是 新URL(?r=随机) -> setAttribute('src') -> load() -> play()
-//   load() 会中止上一段请求并重新做资源选择,这才是"刷新"的关键。
+// 1) "换视频"必须是全新的 URL + 显式 load()
+//    固定 URL 赋给 src 属于同一次资源加载,浏览器不会重新请求,
+//    所以"播放下一个"点了没反应、切换页面回来也一样;固定 URL 还容易被缓存。
+//    现在:新URL(?r=随机) -> setAttribute('src') -> load() -> play()
+//
+// 2) "同一个视频"必须是同一个 URL(?i=/?v= 钉住身份)—— 这是"暂停多久都能接着播"的前提
+//    视频源 Worker 每次收到请求都会随机挑一个视频。URL 不带身份时,浏览器在暂停久了
+//    之后重发的那一次请求(连接被回收 / 缓冲被丢弃后的 Range 续传)就会拿到另一个视频:
+//    轻则"变成新视频",重则区间对不上、拿到 500,元素进入 error 状态,再点播放毫无反应。
+//    所以现在先问源站要"这一次播哪一个"(?plan=1),再把身份写进媒体 URL。
 (function () {
   var MEDIA_VIDEO = '${MEDIA_BASE}/video';   // 媒体地址(相对同域)
   var player = document.getElementById('player');
@@ -681,12 +695,20 @@ function videoHtml() {
   var loadTimer = null; // 卡死看门狗
   var retryTimer = null;
   var retry = 0;
+  var recover = 0;      // 播放中途出错后自动救回来的次数
   var hintTimer = null;
+  var lastSave = 0;     // 上次记录播放位置的时刻(timeupdate 节流用)
   var loading = false;  // 是否正在加载(没加载过就不该弹错误提示)
   var metaTimer = null; // 元数据看门狗:避免停留在 300x150 的默认"长条"盒子上
+  var planTimer = null; // 取"这一次播哪一个"的身份的看门狗
+  var pin = null;       // 当前这条视频的身份 {i, name}:URL 靠它钉住同一个视频
+  var seekTo = 0;       // 起播后要跳到的秒数(页面被浏览器重建后接着播用)
   var MAX_RETRY = 5;
   var WATCHDOG_MS = 25000;
   var META_MS = 12000;
+  var PLAN_MS = 6000;   // 源站没升级 / 超时就退回老式随机 URL,至少还能播
+  var RESUME_KEY = 'xjj-video-resume';
+  var RESUME_MAX_AGE = 24 * 60 * 60 * 1000;
 
   function showHint(text, autoHideMs) {
     if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; }
@@ -702,11 +724,75 @@ function videoHtml() {
     if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     if (metaTimer) { clearTimeout(metaTimer); metaTimer = null; }
+    if (planTimer) { clearTimeout(planTimer); planTimer = null; }
   }
 
-  // 随机参数:强制浏览器发一次全新请求(去重靠 Worker 写的 Cookie)
-  function nextVideoUrl() {
-    return MEDIA_VIDEO + '?r=' + Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36);
+  function randToken() {
+    return Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36);
+  }
+
+  // 媒体 URL = 随机串(强制浏览器重新请求)+ 视频身份(把这个 URL 钉在同一个视频上)。
+  //
+  // ★ 这次修复的核心。
+  //   视频源 Worker 每收到一次 /video 请求都会"随机挑一个"视频返回,只要 URL 本身不带身份,
+  //   浏览器在暂停一段时间之后重发的那一次请求(连接被回收 / 缓冲被丢弃后的 Range 续传)
+  //   拿到的就是另一个视频 —— 表现就是"暂停一会儿再点播放,播不动了 / 变成新视频"。
+  //   现在 URL 带上 ?i=<下标>&v=<文件名>,同一个 URL 永远只对应这一个视频:
+  //   暂停多久、重发多少次,都还是暂停的那一个。
+  function videoUrl(identity) {
+    var url = MEDIA_VIDEO + '?r=' + randToken();
+    if (identity) {
+      if (typeof identity.i === 'number') url += '&i=' + identity.i;
+      if (identity.name) url += '&v=' + encodeURIComponent(identity.name);
+    }
+    return url;
+  }
+
+  // 赋 src 之前先向源站要"这一次播哪一个"的身份。
+  // 源站还不支持这个参数 / 超时 / 出错 → 返回 null,退回老式随机 URL。
+  function requestPlan() {
+    return fetch(MEDIA_VIDEO + '?plan=1&r=' + randToken(), { cache: 'no-store', credentials: 'same-origin' })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (j) {
+        if (!j || typeof j.i !== 'number') return null;
+        return { i: j.i, name: typeof j.name === 'string' ? j.name : '' };
+      })
+      .catch(function () { return null; });
+  }
+
+  // ---------- 页面被浏览器重建时,接着播"暂停的那一个" ----------
+  // 手机切后台太久 / 内存回收,浏览器会把页面整个重建:URL 和播放位置全没了,
+  // 重建后再走一次 loadVideo() 就是另一个新视频。把身份和位置存进 sessionStorage,
+  // reload / 前进后退 这类重建就接着播同一个。
+  function writeResume(seconds) {
+    try {
+      if (!pin || typeof pin.i !== 'number') return;
+      sessionStorage.setItem(RESUME_KEY, JSON.stringify({
+        i: pin.i,
+        name: pin.name || '',
+        t: Math.max(0, seconds || 0),
+        at: Date.now(),
+      }));
+    } catch (e) {}
+  }
+  // 只在"没在换台"的时候记录:换台过程中 <video> 会被 pause() 一次,
+  // 那一瞬间 pin 已经指向新视频、currentTime 却还是旧的,记下来就串台了。
+  function saveResume() {
+    if (loading) return;
+    writeResume(player.currentTime || 0);
+  }
+  function readResume() {
+    try {
+      var raw = sessionStorage.getItem(RESUME_KEY);
+      if (!raw) return null;
+      var o = JSON.parse(raw);
+      if (!o || typeof o.i !== 'number') return null;
+      if (Date.now() - (Number(o.at) || 0) > RESUME_MAX_AGE) return null;
+      return o;
+    } catch (e) { return null; }
+  }
+  function clearResume() {
+    try { sessionStorage.removeItem(RESUME_KEY); } catch (e) {}
   }
 
   function safePlay() {
@@ -716,44 +802,87 @@ function videoHtml() {
     } catch (e) { /* 自动播放被拦截等,忽略 */ }
   }
 
-  // 播放下一个 / 连播 / 重试 都走这里
-  function loadVideo() {
+  // 播放下一个 / 连播 / 重试 / 页面重建后接着播 都走这里
+  //   opts.pin  = {i, name}:直接播这一个(重试用,不再向源站要新身份)
+  //   opts.seek = 秒数:起播后跳到这个位置(页面重建后接着播用)
+  function loadVideo(opts) {
+    opts = opts || {};
     var my = ++seq;
+    var wantPin = (opts.pin && typeof opts.pin.i === 'number') ? opts.pin : null;
+    var wantSeek = opts.seek > 0 ? opts.seek : 0;
+    var started = false;
+
     clearTimers();
     loading = true;
 
     try { player.pause(); } catch (e) {}
 
-    player.setAttribute('src', nextVideoUrl());
-    player.load();      // 关键:中止旧请求 + 重新做资源选择
-    safePlay();
+    function start(identity) {
+      if (my !== seq || started) return;
+      started = true;
+      if (planTimer) { clearTimeout(planTimer); planTimer = null; }
 
-    // 元数据看门狗:videoWidth 还是 0 说明分辨率未知,
-    // 元素会保持 300x150 的默认比例(刷新时看到的"长条"),重来一次
-    metaTimer = setTimeout(function () {
-      if (my !== seq) return;
-      if (!player.videoWidth && player.readyState === 0 && !player.error) loadVideo();
-    }, META_MS);
+      pin = identity || null;
+      seekTo = wantSeek;
+      writeResume(wantSeek);   // 记录随之跟着新视频走,免得重载后又接回上一个
+      player.setAttribute('src', videoUrl(identity));
+      player.load();      // 关键:中止旧请求 + 重新做资源选择
+      safePlay();
 
-    // 看门狗:一直读不到数据就重来一次(服务端偶发 502/空响应)
-    loadTimer = setTimeout(function () {
-      if (my !== seq) return;
-      if (player.readyState < 2 && !player.error) loadVideo();
-    }, WATCHDOG_MS);
+      // 元数据看门狗:videoWidth 还是 0 说明分辨率未知,
+      // 元素会保持 300x150 的默认比例(刷新时看到的"长条"),重来一次
+      // ——重来也要钉在同一个视频上,不许偷偷换成另一个
+      metaTimer = setTimeout(function () {
+        if (my !== seq) return;
+        if (!player.videoWidth && player.readyState === 0 && !player.error) loadVideo({ pin: pin, seek: wantSeek });
+      }, META_MS);
+
+      // 看门狗:一直读不到数据就重来一次(服务端偶发 502/空响应)
+      loadTimer = setTimeout(function () {
+        if (my !== seq) return;
+        if (player.readyState < 2 && !player.error) loadVideo({ pin: pin, seek: wantSeek });
+      }, WATCHDOG_MS);
+    }
+
+    // 已经知道要播哪一个(重试)→ 直接用它,不再向源站要新身份,
+    // 否则"重试"就变成了"换成另一个视频"
+    if (wantPin) { start(wantPin); return; }
+
+    // 先要身份,再赋 src:这个 URL 从此固定对应这一个视频
+    planTimer = setTimeout(function () { planTimer = null; start(null); }, PLAN_MS);
+    requestPlan().then(function (identity) { start(identity); });
   }
 
   function onReady() {
+    var wasLoading = loading;
     clearTimers();
     retry = 0;
+    recover = 0;
     loading = false;
     showHint('');
-    safePlay();
+    // 只有"这一次本来就是我们在加载"(wasLoading)才自动起播。
+    // 否则用户自己暂停的视频会因为 loadeddata/canplay 再次触发而被自动播起来,
+    // 变成"暂停不住"。
+    if (wasLoading || !player.paused) safePlay();
   }
 
   // 失败:静默自动重试(不弹"加载中/重试中",保持画面干净),超过上限才提示
   // 用户主动暂停时(pause 事件已触发)不自动重试,避免"暂停后过一会跳到下一个"
   function onError() {
-    if (!loading) return;
+    if (!loading) {
+      // 已经播过的视频,在暂停很久之后续传失败(源站 4xx/5xx、区间失效)时,
+      // <video> 会进入 error 状态,这时候再点播放是没有任何反应的。
+      // 用同一个身份从当前位置重来一次 —— 注意绝不能在这里"顺手换一个视频"。
+      if (!pin) return;
+      if (recover >= 3) { showHint('播放出错,请点「播放下一个」'); return; }
+      if (retryTimer) return;
+      recover++;
+      retryTimer = setTimeout(function () {
+        retryTimer = null;
+        loadVideo({ pin: pin, seek: player.currentTime || 0 });
+      }, 1000);
+      return;
+    }
     if (player.paused && !player.ended) {
       // 视频被用户暂停,不视为真正失败,不自动跳下一个
       return;
@@ -766,11 +895,9 @@ function videoHtml() {
     if (retryTimer) return;
     retryTimer = setTimeout(function () {
       retryTimer = null;
-      loadVideo();
+      loadVideo({ pin: pin, seek: player.currentTime || 0 });   // 重试同一个视频,别换
     }, 1500);
   }
-
-  nextBtn.addEventListener('click', loadVideo);
 
   switchBtn.addEventListener('click', function () {
     auto = !auto;
@@ -786,17 +913,43 @@ function videoHtml() {
     if (player.paused) return;
     if (loadTimer) return;
     var my = seq;
+    var keepPin = pin;    // 重来还是这一个视频
     loadTimer = setTimeout(function () {
       loadTimer = null;
       if (my !== seq) return;
-      if (player.readyState < 2 && !player.error && !player.paused) loadVideo();
+      if (player.readyState < 2 && !player.error && !player.paused) {
+        loadVideo({ pin: keepPin, seek: player.currentTime || 0 });
+      }
     }, WATCHDOG_MS);
+  });
+
+  // 元数据一到:如果这次是"页面被重建后接着播",就跳回刚才的位置
+  player.addEventListener('loadedmetadata', function () {
+    if (!seekTo) return;
+    var t = seekTo;
+    seekTo = 0;
+    try {
+      var d = player.duration;
+      if (isFinite(d) && d > 0 && t > d - 1) t = 0;   // 已经贴着结尾了就别再跳
+      if (t > 0) player.currentTime = t;
+    } catch (e) {}
+  });
+
+  // 播放位置随时记一份,页面被浏览器重建时才有得接(节流,别每帧写)
+  player.addEventListener('pause', saveResume);
+  player.addEventListener('timeupdate', function () {
+    if (player.paused) return;
+    var now = Date.now();
+    if (now - lastSave < 5000) return;
+    lastSave = now;
+    saveResume();
   });
 
   // 视频播放完毕:不弹提示条(保持画面干净),自动续播或停在结尾
   // 停在结尾时,点画面 / 双击 / 「播放下一个」都会换新视频重播
   player.addEventListener('ended', function () {
     clearTimers();
+    clearResume();          // 已经播完,不需要"接着播"
     if (auto) {
       loadVideo();
     }
@@ -811,14 +964,21 @@ function videoHtml() {
   });
 
   // 双击画面 = 强制换一个视频(即使还在播也换)
-  player.addEventListener('dblclick', loadVideo);
+  //
+  // 但原生控件条上的双击必须忽略:点「播放/暂停」按钮时,事件会冒泡到 <video>,
+  // 用户"点了没反应、再点一下"就成了双击 → 平白换成另一个视频。
+  // 这正是"暂停久了再点播放,结果变成新视频"的一条路。
+  player.addEventListener('dblclick', function (e) {
+    if (e.offsetY > player.clientHeight - 64) return;   // 落在控件条上,不算"双击画面"
+    loadVideo();
+  });
 
-  // 点「播放下一个」:
-  //   - 已结束 → 换新视频(新URL+load())
-  //   - 还在播 → 暂停,不跳(暂停是正常行为,不该强制换)
+  // 点「播放下一个」= 直接换下一个视频:
+  //   - 正在播 / 暂停中 / 停在结尾,一律换新视频(新URL + load())
+  //   以前这里写成"还在播就先暂停,不跳",于是点了半天只是把当前这个暂停住,
+  //   根本没有"下一个" —— 按钮上写着"播放下一个",就该播放下一个。
   nextBtn.addEventListener('click', function () {
-    if (player.ended || !player.src) loadVideo();
-    else { try { player.pause(); } catch (e) {} }
+    loadVideo();
   });
 
   // 切回本页面(从图片页返回 / 从后台切回)时,若视频停在结尾就自动换下一个
@@ -829,12 +989,11 @@ function videoHtml() {
       safePlay();
     }
   });
+  window.addEventListener('pagehide', saveResume);
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && player.ended && auto) loadVideo();
+    if (document.visibilityState === 'hidden') { saveResume(); return; }
+    if (player.ended && auto) loadVideo();
   });
-
-  // 双击画面 = 换一个视频
-  player.addEventListener('dblclick', loadVideo);
 
   // 地址栏只保留主域名:如果是从旧链接 /?type=video 进来的,静默清理掉后缀,
   // 不发新请求、不加历史记录,避免下次复制地址又带回 ?type=video
@@ -843,7 +1002,20 @@ function videoHtml() {
   }
 
   // 首屏:脚本就绪后再发起,避免和页面其他请求抢带宽
-  loadVideo();
+  //   - 直接打开 / 点链接进来 -> 播一个新的
+  //   - 页面被重载 / 前进后退(手机切后台太久被浏览器重建)-> 接着播"暂停的那一个"
+  var navType = '';
+  try {
+    var navEntries = performance.getEntriesByType ? performance.getEntriesByType('navigation') : null;
+    if (navEntries && navEntries[0] && navEntries[0].type) navType = navEntries[0].type;
+  } catch (e) {}
+  var keep = (navType === 'reload' || navType === 'back_forward') ? readResume() : null;
+  if (keep) {
+    loadVideo({ pin: { i: keep.i, name: keep.name }, seek: Number(keep.t) || 0 });
+  } else {
+    clearResume();
+    loadVideo();
+  }
 })();
   </script>
   <script>

@@ -20,6 +20,19 @@
 //     原样返回——绝不能自己贴上 Content-Range 硬当成 206,
 //     否则浏览器会按错误的字节区间解析,表现为视频卡住不播/换了也不刷新。
 //
+// ★ URL 必须能唯一确定一个视频(修复"暂停久了再点播放变成新视频/播不动"):
+//   本 Worker 每收到一次请求都会"随机挑一个"视频,所以同一个 URL 重复请求 ——
+//   浏览器暂停久了之后重发的那次 Range 续传、或重新做一次资源选择 —— 会拿到
+//   另一个视频;区间还可能落到新文件的长度之外(上游 416)直接报错。
+//   现在支持:
+//     GET /?plan=1      先问"这一次播哪一个" -> JSON {i, n, name},
+//                       同时把这条记录写进去重 Cookie(去重语义不变);
+//     GET /?v=<文件名>  只服务这一个文件(最稳:文件列表顺序变了也还是它);
+//     GET /?i=<下标>    只服务这个下标(兼容只带下标的调用,越界则退回随机);
+//     GET /?r=<随机串>  老行为:随机挑一个(页面上带 ?i=/?v= 时不会走到这里)。
+//   带 ?i= / ?v= 的请求不再改 Cookie:身份在 ?plan=1 那一步就已经记账了,
+//   同一个 URL 重发多少次都是同一个视频。
+//
 // Cookie 体积:
 //   - 用位图(bitmask)记录已播索引,而非 JSON 数组。341 个视频只需 ~60 字节,
 //     1000 个也才 ~130 字节,彻底摆脱浏览器 4096 字节的 Cookie 上限。
@@ -82,17 +95,55 @@ async function handleRequest(request) {
   // 2. 从 Cookie 读已播记录(位图),做 1 小时去重
   const now = Date.now();
   const state = parseCookie(request.headers.get('Cookie') || '', now, files.length);
+  const url = new URL(request.url);
 
-  // 3. 选视频:从未播过的里随机挑;若一轮已播完,重置
-  const exclude = state.played.size >= files.length ? new Set() : state.played;
-  const picked = pickRandom(files, exclude);
-  if (!picked) return new Response('No video available', { status: 500 });
+  // 2.5 计划模式:页面先问"这一次播哪一个",拿到身份(i / name)后再赋给 src。
+  //     这一步是"暂停多久都能接着播同一个"的前提:媒体 URL 必须自带身份。
+  //     去重记账放在这里(和以前放在媒体请求里等价):挑一个没播过的,写进 Cookie。
+  if (isPlanRequest(url)) {
+    const exclude = state.played.size >= files.length ? new Set() : state.played;
+    const planned = pickRandom(files, exclude);
+    if (!planned) return new Response('No video available', { status: 500 });
 
-  // 4. 更新已播记录(位图),生成新的 Cookie 值
-  const nextPlayed = new Set(state.played);
-  nextPlayed.add(picked.index);
-  const nextWindowStart = state.played.size >= files.length ? now : state.windowStart;
-  const nextCookieValue = encodeSeen(nextPlayed, nextWindowStart, files.length);
+    const nextPlayed = new Set(state.played);
+    nextPlayed.add(planned.index);
+    const nextWindowStart = state.played.size >= files.length ? now : state.windowStart;
+
+    return new Response(
+      JSON.stringify({ i: planned.index, n: files.length, name: planned.file.name }),
+      {
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Set-Cookie':
+            COOKIE_NAME + '=' + encodeSeen(nextPlayed, nextWindowStart, files.length) +
+            '; Path=/; Max-Age=' + WINDOW_MS + '; SameSite=Lax',
+        },
+      }
+    );
+  }
+
+  // 3. 选视频:
+  //    URL 自带身份 -> 精确播那一个。重复请求、Range 续传必须命中同一个文件,
+  //    否则"暂停一会儿再点播放"就会变成另一个视频。
+  //    没带身份 -> 老行为,随机挑一个。
+  const pinned = pinnedFile(url, files);
+  let picked;
+  let nextCookieValue = '';
+  if (pinned) {
+    picked = pinned;
+  } else {
+    const exclude = state.played.size >= files.length ? new Set() : state.played;
+    picked = pickRandom(files, exclude);
+    if (!picked) return new Response('No video available', { status: 500 });
+
+    // 4. 更新已播记录(位图),生成新的 Cookie 值
+    const nextPlayed = new Set(state.played);
+    nextPlayed.add(picked.index);
+    const nextWindowStart = state.played.size >= files.length ? now : state.windowStart;
+    nextCookieValue = encodeSeen(nextPlayed, nextWindowStart, files.length);
+  }
 
   // 5. 抓取视频二进制流(透传 Range),直接返回 + 写 Cookie
   const rangeHeader = request.headers.get('Range');
@@ -105,11 +156,15 @@ async function handleRequest(request) {
     'Content-Type': video.contentType,
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
-    // 把最新已播记录回传,浏览器下次请求自动带上
-    'Set-Cookie':
-      COOKIE_NAME + '=' + nextCookieValue +
-      '; Path=/; Max-Age=' + WINDOW_MS + '; SameSite=Lax',
   };
+  // 只有"这一次是我随机挑的"才回传新的已播记录;
+  // 精确播某一条(?i=/?v=)不改 Cookie —— 身份早在 ?plan=1 那一步记过账了,
+  // 而且这样浏览器重发多少次(Range 续传)都不会再动去重窗口。
+  if (nextCookieValue) {
+    headers['Set-Cookie'] =
+      COOKIE_NAME + '=' + nextCookieValue +
+      '; Path=/; Max-Age=' + WINDOW_MS + '; SameSite=Lax';
+  }
 
   // 只有上游确实回了 206 且带完整 Content-Range 时才透传 206
   if (video.isPartial && video.contentRange) {
@@ -238,13 +293,45 @@ function githubHeaders() {
   return h;
 }
 
+// ---------- 请求参数:计划模式 / 视频身份 ----------
+
+// 页面在赋 src 之前先来问"这一次播哪一个"?plan=1 走 JSON 分支。
+function isPlanRequest(url) {
+  const v = url.searchParams.get('plan');
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+// URL 自带的视频身份。
+//   ?v=<文件名> 最稳:文件列表顺序变了(重排 / 增删)也还是同一个文件;
+//   ?i=<下标>   兼容只带下标的调用,越界就返回 null(调用方退回随机挑)。
+// 拿不到身份时返回 null —— 老客户端和直接访问照旧是随机播放。
+function pinnedFile(url, files) {
+  const name = url.searchParams.get('v');
+  if (name) {
+    const idx = files.findIndex((f) => f.name === name);
+    if (idx !== -1) return { index: idx, file: files[idx] };
+  }
+  const raw = url.searchParams.get('i');
+  if (raw !== null && raw !== '') {
+    const idx = Number(raw);
+    if (Number.isInteger(idx) && idx >= 0 && idx < files.length) return { index: idx, file: files[idx] };
+  }
+  return null;
+}
+
 // ---------- 抓取单个视频(支持 Range) ----------
 
 async function fetchVideo(downloadUrl, rangeHeader) {
   const headers = { 'User-Agent': 'Cloudflare Workers' };
   if (rangeHeader) headers['Range'] = rangeHeader;
 
-  const res = await fetch(downloadUrl, { headers });
+  let res = await fetch(downloadUrl, { headers });
+  // 请求的区间落在文件末尾之外(暂停很久后从旧位置续传、或停在结尾)时上游回 416。
+  // 这时退回整段响应(200),让浏览器自己从头恢复 —— 好过把 500 丢给 <video>:
+  // 那会让元素直接进入 error 状态,再点播放毫无反应。
+  if (res.status === 416 && rangeHeader) {
+    res = await fetch(downloadUrl, { headers: { 'User-Agent': 'Cloudflare Workers' } });
+  }
   if (!res.ok && res.status !== 206) return null;
 
   const type = (res.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
