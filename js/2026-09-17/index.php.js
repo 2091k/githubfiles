@@ -751,8 +751,13 @@ function videoHtml() {
   }
 
   // 失败:静默自动重试(不弹"加载中/重试中",保持画面干净),超过上限才提示
+  // 用户主动暂停时(pause 事件已触发)不自动重试,避免"暂停后过一会跳到下一个"
   function onError() {
     if (!loading) return;
+    if (player.paused && !player.ended) {
+      // 视频被用户暂停,不视为真正失败,不自动跳下一个
+      return;
+    }
     if (retry >= MAX_RETRY) {
       showHint('加载失败,请再点一次「播放下一个」');
       return;
@@ -777,6 +782,8 @@ function videoHtml() {
   player.addEventListener('error', onError);
   player.addEventListener('stalled', function () {
     // 卡住不动超过一个看门狗周期就重来
+    // 用户主动暂停时不启动看门狗,避免"暂停后过一会跳到下一个"
+    if (player.paused) return;
     if (loadTimer) return;
     var my = seq;
     loadTimer = setTimeout(function () {
@@ -786,14 +793,32 @@ function videoHtml() {
     }, WATCHDOG_MS);
   });
 
+  // 视频播放完毕:不弹提示条(保持画面干净),自动续播或停在结尾
+  // 停在结尾时,点画面 / 双击 / 「播放下一个」都会换新视频重播
   player.addEventListener('ended', function () {
     clearTimers();
     if (auto) {
-      loadVideo();   // 连播同样走 load() 路径,避免"下一个不刷新"
-    } else {
-      showHint('本视频播放完毕');
-      nextBtn.innerText = '播放下一个';
+      loadVideo();
     }
+    // auto === false:什么都不做,等用户操作
+  });
+
+  // 单点画面:
+  //   - 视频还没结束 → 原生 play/pause(controls 属性已接管)
+  //   - 视频已结束   → 换下一个视频重播
+  player.addEventListener('click', function () {
+    if (player.ended) loadVideo();
+  });
+
+  // 双击画面 = 强制换一个视频(即使还在播也换)
+  player.addEventListener('dblclick', loadVideo);
+
+  // 点「播放下一个」:
+  //   - 已结束 → 换新视频(新URL+load())
+  //   - 还在播 → 暂停,不跳(暂停是正常行为,不该强制换)
+  nextBtn.addEventListener('click', function () {
+    if (player.ended || !player.src) loadVideo();
+    else { try { player.pause(); } catch (e) {} }
   });
 
   // 切回本页面(从图片页返回 / 从后台切回)时,若视频停在结尾就自动换下一个
