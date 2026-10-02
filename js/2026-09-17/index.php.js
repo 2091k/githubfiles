@@ -251,14 +251,19 @@ function imageHtml() {
          用 canvas 而不是 <img>,是为了彻底避免"再请求一次图片" —— 图片 Worker
          每收到一次请求就换一张没看过的图,只要重新请求,放大就会变成另一张图。 */
       #modalImg {
-        max-width: 95vw;
-        max-height: 95vh;
-        transition: transform 0.1s ease-out;
+        /* 布局盒尺寸 = openModal 显式写入的 CSS width/height(95% 视口内保持原始
+           纵横比,小图不超 100%)。不再用 max-width/max-height:
+           它们会把 canvas 渲染盒裁到比布局盒小,flex 居中按布局盒、
+           而缩放锚点按渲染盒 -> 坐标系错位,是"缩放漂移/松手还原"的根因。 */
+        /* 故意不给 transform 加 transition:
+           拖动时每帧都在变 translate,任何过渡都会让图"追"鼠标,快速甩动后
+           被过渡拽回旧位置 —— 这也是"拖完图又还原回去了"的根因。 */
         transform-origin: center center;
         will-change: transform;
         -webkit-user-drag: none;
         user-drag: none;
         touch-action: none;
+        display: block;
       }
       #imgModal.active #modalImg {
         display: block;
@@ -330,7 +335,7 @@ function imageHtml() {
   player.addEventListener('load', function () {
     state = 'shown';
     copyToModalCanvas();     // 图一显示出来就立刻复制像素,后面放大用这份副本
-    showHint('');
+    showHint('', 4000);
   });
 
   player.addEventListener('error', function () {
@@ -388,6 +393,16 @@ function imageHtml() {
   var ZOOM_STEP = 0.2, MAX_SCALE = 5, MIN_SCALE = 0.5;
   var touchMode = false;      // 正在双指手势(声明提前,pointerdown 会读它)
   var pinchStartDist = 0, pinchStartScale = 1;
+  // ★ 关键修复:"拖完松手图就还原"的根因。
+  //   拖动中我们对弹窗容器做了 setPointerCapture(为了鼠标拖出边界还能跟手),
+  //   捕获会把松手后浏览器派发的 click 事件重定向到容器 #imgModal 上,
+  //   使 click 的 e.target === 容器,命中"点背景关闭"判断 -> closeModal()
+  //   把 scale/pos 全部复位,视觉上就是"松手瞬间图缩回未放大状态"。
+  //   对策:记录本次按压是否真的发生位移(>5px 才算拖动),click 时:
+  //     - 是拖动的尾巴 -> 吞掉,绝不关弹窗;
+  //     - 是真正的单击 -> 用 elementFromPoint 判断实际点中图片还是背景,
+  //       只有点在黑色背景上才关闭(点图片上不做任何事)。
+  var pressDownX = 0, pressDownY = 0, pressMoved = false;
 
   function round2(n) { return Math.round(n * 100) / 100; }
   function updateTransform() {
@@ -397,20 +412,21 @@ function imageHtml() {
 
   // 围绕屏幕上某个点缩放:该点对应的图片内容保持不动
   //
-  // 推导(元素中心固定在 transform-origin 处,pos 是元素中心相对它的位移):
-  //   图片坐标 u = (X - center - pos) / scale
-  //   要求光标 X=cx 处的 u 缩放前后不变:
-  //     (d - posOld) / scaleOld = (d - posNew) / scaleNew ,  d = cx - center
-  //   => posNew = d - (d - posOld) * ratio ,  ratio = scaleNew / scaleOld
+  // 数学(canvas 布局盒被 flex 居中在视口中央,布局中心 = 视口中心,
+  //   transform: translate(pos) scale(s) 以布局盒中心为原点):
+  //     内容像素 u(相对布局中心) 落在视口 X = Vw/2 + pos + u * s
+  //     => 渲染中心永远是 Vw/2 + pos(与 s 无关)
+  //   要求光标 cx 处的内容 u 缩放前后不变:
+  //     (cx - Vw/2 - posOld)/sOld = (cx - Vw/2 - posNew)/sNew
+  //   => posNew = d - (d - posOld) * (sNew/sOld) ,  d = cx - Vw/2
+  //   ★ 注意 d 里不含 posOld —— 旧版把 d 写成 cx-(Vw/2+posOld),
+  //     等价于每次缩放都往回拽 pos,连续滚几格后图就"飘回"未放大位置。
   function zoomAt(cx, cy, nextScale) {
     nextScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
     if (nextScale === scale) return;
-    var r = modalImg.getBoundingClientRect();
-    var centerX = r.left + r.width / 2;   // 元素实际中心(已含当前平移与缩放)
-    var centerY = r.top + r.height / 2;
+    var dx = cx - window.innerWidth / 2;
+    var dy = cy - window.innerHeight / 2;
     var ratio = nextScale / scale;
-    var dx = cx - centerX;
-    var dy = cy - centerY;
     posX = dx - (dx - posX) * ratio;
     posY = dy - (dy - posY) * ratio;
     scale = nextScale;
@@ -448,6 +464,26 @@ function imageHtml() {
     if (!(player.naturalWidth && player.complete)) return false;
     // 每次打开都重新复制一次像素(换图后 load 也会复制,这里兜底)
     if (!copyToModalCanvas()) { showHint('无法放大这张图,请点「下一个」'); return false; }
+
+    // ★ 关键修复:"松手还原"的根因。
+    //   canvas 的布局盒由 width/height 属性决定(copyToModalCanvas 已设为图片
+    //   原始像素尺寸),而渲染盒又被 CSS 的 max-width/max-height(95vw/95vh)
+    //   裁到更小 —— 两者尺寸不一致时,flex 居中(flex 只看布局盒)会把元素
+    //   按"原始大像素尺寸"居中,而 getBoundingClientRect() 返回的却是被裁后
+    //   的渲染盒中心,两个坐标系错位:
+    //     - 每次 zoomAt 拿 rect 中心当锚点,算出来的 pos 就偏,
+    //     - 偏了之后下一次缩放又基于错的锚点再偏一次,误差累积,
+    //     - 用户松手时图就"跳回"一个和光标/缩放完全不对的位置,
+    //       看起来就是"还原到没放大时"。
+    //   对策:显式给 canvas 一个"95% 视口内保持原始纵横比"的渲染尺寸,
+    //   让布局盒与渲染盒严格一致,flex 居中、getBoundingClientRect、zoomAt
+    //   全程共用同一个坐标系,缩放/拖动/松手都不再跳。
+    //   min() 保证小图不会超出 100% 被放大(放大变糊),只有大图才裁到 95%。
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var nW = player.naturalWidth, nH = player.naturalHeight;
+    var fit = Math.min(vw * 0.95 / nW, vh * 0.95 / nH, 1);
+    modalImg.style.width = (nW * fit) + 'px';
+    modalImg.style.height = (nH * fit) + 'px';
 
     scale = 1;
     posX = 0;
@@ -487,10 +523,30 @@ function imageHtml() {
     closeModal();
   });
   modal.addEventListener('click', function (e) {
-    if (e.target === modal) { e.stopPropagation(); closeModal(); }
+    // 拖动/捏合后的松手会派发出一个 click(指针捕获把它重定向到 modal 上,
+    // e.target === modal)。这个 click 是拖动的"尾巴",不是用户想关闭弹窗的
+    // 点击 —— 不吞掉它,closeModal() 就会把 scale/pos 复位,表现为"松手还原"。
+    if (pressMoved) {
+      e.preventDefault();
+      e.stopPropagation();
+      pressMoved = false;
+      return;
+    }
+    // 没拖动的真单击:看实际点中的是不是背景黑边(elementFromPoint 不受
+    // 指针捕获影响,返回的是该坐标下真正最上层的元素)。
+    //   点黑边 -> 关弹窗;点图片本身 -> 什么都不做(旧版把图片上的单击也
+    //   当成"点背景",会把弹窗误关了)。
+    var hit = document.elementFromPoint(e.clientX, e.clientY);
+    if (hit === modal) { e.stopPropagation(); closeModal(); }
   });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeModal();
+    // 键盘右键(ArrowRight)= 点「下一个」:换新图;
+    // 弹窗打开时同样生效(先关弹窗再换,和点「下一个」按钮行为一致)。
+    if (e.key === 'ArrowRight') {
+      if (modal.classList.contains('active')) closeModal();
+      next();
+    }
   });
 
   // ---------- 鼠标:滚轮缩放 ----------
@@ -508,8 +564,19 @@ function imageHtml() {
   //   - 双指:捏合缩放,围绕两指中点(从手势起点绝对计算,不逐帧递推 -> 不漂移)
   // 这里必须自己维护"活跃指针表",不能用 e.isPrimary 过滤第二根手指,
   // 否则第二根手指的事件被丢掉,双指就永远捏不动 —— 之前正是这个原因。
+  //
+  // ★ "拖完松手图就还原"的另一半根因也在这里:
+  //   指针按在 canvas 上拖动时,setPointerCapture 会把后续事件(包括松手后
+  //   浏览器派发的 click)重定向到捕获元素 modal 上,click 的 e.target 变成
+  //   modal 本身 -> 命中"点背景就关弹窗"的判断 -> closeModal() 把 scale/pos
+  //   全部复位,视觉上就是"松手瞬间图缩回原样"。
+  //   对策:记录本次按压是否真的拖动过(pressMoved),click 时:
+  //     - 拖过 -> 吞掉 click(它只是拖动的尾巴,不是用户的点击意图)
+  //     - 没拖过 -> 用 elementFromPoint 判断实际点中的是图片还是背景,
+  //       只有点在背景黑边上才关弹窗,点图片上什么都不做。
   var activePointers = Object.create(null);
   var pointerCount = 0;
+  var pressMoved = false;   // 本次按压期间是否发生过真实位移(>=5px)
 
   function pointerDistance() {
     var list = Object.keys(activePointers).map(function (k) { return activePointers[k]; });
@@ -545,6 +612,9 @@ function imageHtml() {
     activePointers[e.pointerId] = { x: e.clientX, y: e.clientY };
     pointerCount++;
     e.preventDefault();
+    pressMoved = false;   // 新的一次按压,重置"是否拖过"标记
+    pressDownX = e.clientX;
+    pressDownY = e.clientY;
 
     if (pointerCount >= 2) {
       // 第二根手指落下 -> 进入捏合;即使只有一帧也要立即算一次,
@@ -577,6 +647,11 @@ function imageHtml() {
       return;
     }
     if (!dragging) return;
+    // 记录"真的拖过了":供 click 事件判断这是拖动尾巴还是真点击
+    if (!pressMoved &&
+        Math.abs(e.clientX - pressDownX) + Math.abs(e.clientY - pressDownY) > 5) {
+      pressMoved = true;
+    }
     posX = dragPosX + (e.clientX - dragX);
     posY = dragPosY + (e.clientY - dragY);
     updateTransform();
@@ -994,6 +1069,20 @@ function videoHtml() {
     if (document.visibilityState === 'hidden') { saveResume(); return; }
     if (player.ended && auto) loadVideo();
   });
+
+  // 键盘右键(ArrowRight)= 点「播放下一个」:换新视频,
+  // 无论当前是播放中、暂停还是停在结尾,行为都和点按钮一致。
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      loadVideo();
+    }
+  });
+
+  // 给底部按钮区一个轻提示:键盘 → 键也能换视频
+  if (hintEl) {
+    showHint('提示:按键盘 → 键可播放下一个视频', 4000);
+  }
 
   // 地址栏只保留主域名:如果是从旧链接 /?type=video 进来的,静默清理掉后缀,
   // 不发新请求、不加历史记录,避免下次复制地址又带回 ?type=video
